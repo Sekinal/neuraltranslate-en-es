@@ -3,8 +3,8 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 
 # --- User's existing code ---
-tokenizer = AutoTokenizer.from_pretrained("unsloth/gemma-3-4b-it")
-full_dataset = load_dataset("Thermostatic/Axolotl-Spanish-Nahuatl-ShareGPT-Filtered", split="train")
+tokenizer = AutoTokenizer.from_pretrained("unsloth/gemma-3-1b-it-unsloth-bnb-4bit")
+full_dataset = load_dataset("Thermostatic/NeuralTranslate-mt-en-es-v2", split="train")
 df = full_dataset.to_polars()
 
 transformed_df = df.select(
