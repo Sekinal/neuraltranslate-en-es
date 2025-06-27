@@ -1,6 +1,12 @@
 from unsloth import FastModel
 import torch
 
+# [NEW] Note: To use the COMET and BLEURT metrics, you need to install them first:
+# pip install unbabel-comet
+# pip install evaluate bleurt
+# pip install git+https://github.com/lucadiliello/bleurt-pytorch.git
+# The first time you run this, it will download the models (e.g., wmt22-comet-da, bleurt-20).
+
 model, tokenizer = FastModel.from_pretrained(
     model_name = "unsloth/gemma-3-1b-it-unsloth-bnb-4bit",
     max_seq_length = 256, # Choose any for long context!
@@ -39,7 +45,6 @@ print(f"Dataset splits:")
 print(f"  Train: {len(train_dataset)} examples")
 print(f"  Validation: {len(validation_dataset)} examples")
 
-### MODIFICATION ###
 # 2. Standardize and format all three dataset splits
 from unsloth.chat_templates import standardize_data_formats
 
@@ -53,57 +58,90 @@ def formatting_prompts_func(examples):
 
 # Apply formatting to all splits
 train_dataset = train_dataset.map(
-    formatting_prompts_func, 
+    formatting_prompts_func,
     batched = True
     )
 validation_dataset = validation_dataset.map(
-    formatting_prompts_func, 
+    formatting_prompts_func,
     batched = True
     )
 
 from evaluate import load
 import numpy as np # Make sure to import numpy
+# [NEW] Import custom BLEURT classes
+from bleurt_pytorch import BleurtConfig, BleurtForSequenceClassification, BleurtTokenizer
 
-# Load the metric. chrF is a great choice here.
+
+# --- Load all evaluation metrics once ---
 chrf_metric = load("chrf")
+comet_metric = load("comet")
+
+# [NEW] Load the custom BLEURT-20 model and tokenizer
+print("Loading custom BLEURT-20 model...")
+bleurt_model_name = 'lucadiliello/BLEURT-20'
+bleurt_config = BleurtConfig.from_pretrained(bleurt_model_name)
+bleurt_model = BleurtForSequenceClassification.from_pretrained(bleurt_model_name)
+bleurt_tokenizer = BleurtTokenizer.from_pretrained(bleurt_model_name)
+
+# Move BLEURT model to GPU if available for faster evaluation
+bleurt_device = "cuda" if torch.cuda.is_available() else "cpu"
+bleurt_model.to(bleurt_device)
+bleurt_model.eval() # Set to evaluation mode
+print("BLEURT-20 model loaded successfully.")
+# ----------------------------------------
+
 
 def preprocess_logits_for_metrics(logits, labels):
-    """
-    This function is called by the Trainer before computing metrics.
-    It takes the raw logits and converts them to the predicted token IDs.
-    This is memory-efficient as it avoids storing all logits.
-    """
-    # The logits are often a tuple, so we take the first element.
     if isinstance(logits, tuple):
         logits = logits[0]
-        
-    # Get the predicted token IDs by taking the argmax along the last dimension.
     pred_ids = torch.argmax(logits, dim=-1)
     return pred_ids
 
 def compute_metrics(eval_pred):
     pred_ids, label_ids = eval_pred
 
-    # **THE FIX IS HERE**
-    # Mask the predictions where the label is -100.
-    # This prevents the tokenizer from trying to decode irrelevant tokens
-    # predicted for the prompt or padding.
+    # Clean up predictions and labels
     pred_ids = np.where(label_ids != -100, pred_ids, tokenizer.pad_token_id)
-    
-    # Also clean up the labels as before.
     label_ids = np.where(label_ids != -100, label_ids, tokenizer.pad_token_id)
 
     # Decode predictions and labels.
     decoded_preds = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
     decoded_labels = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
-    # The `chrf` metric expects a list of predictions and a list of lists of references.
+    # --- COMET requires the original source text ---
+    # We extract it from the validation_dataset, which is accessible in this scope.
+    # After `standardize_data_formats`, the key changes from 'value' to 'content'.
+    sources = [
+        ex["conversations"][0]["content"]
+        for ex in validation_dataset
+    ]
+
+    # --- Calculate chrF score ---
     decoded_labels_nested = [[label] for label in decoded_labels]
+    chrf_result = chrf_metric.compute(predictions=decoded_preds, references=decoded_labels_nested)
 
-    # Compute the metric
-    result = chrf_metric.compute(predictions=decoded_preds, references=decoded_labels_nested)
+    # --- Calculate COMET score ---
+    comet_result = comet_metric.compute(
+        predictions=decoded_preds,
+        references=decoded_labels,
+        sources=sources
+    )
 
-    return {"chrf": result["score"]}
+    # --- [NEW] Calculate BLEURT score using the custom model ---
+    with torch.no_grad():
+        # The custom tokenizer expects (references, candidates)
+        inputs = bleurt_tokenizer(decoded_labels, decoded_preds, padding='longest', return_tensors='pt').to(bleurt_device)
+        bleurt_logits = bleurt_model(**inputs).logits.flatten().tolist()
+    bleurt_score = np.mean(bleurt_logits)
+
+
+    # Return a dictionary of all scores.
+    return {
+        "chrf": chrf_result["score"],
+        "comet": comet_result["mean_score"],
+        "bleurt": bleurt_score,
+    }
+
 
 # 3. Configure the trainer to use the validation set and report metrics
 from trl import SFTTrainer, SFTConfig
@@ -132,10 +170,10 @@ trainer = SFTTrainer(
         prediction_loss_only=False,
         # New arguments for validation and saving
         eval_strategy="epoch",
-        save_strategy = "epoch",             # Save a checkpoint at the end of each epoch
-        load_best_model_at_end=True,     # 4. Enable loading the best model
-        metric_for_best_model="chrf",    # 5. Tell it WHICH metric defines "best"
-        greater_is_better=True,  
+        save_strategy = "epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="comet", # [NEW] You can now change this to "bleurt"
+        greater_is_better=True,
     ),
 )
 
@@ -146,7 +184,7 @@ trainer = train_on_responses_only(
     response_part = "<start_of_turn>model\n",
 )
 
-# Start training. Validation loss will be calculated and reported to W&B automatically.
+# Start training. Validation loss and metrics (chrF, COMET, BLEURT) will be calculated and reported.
 print("Starting training...")
 trainer_stats = trainer.train()
 

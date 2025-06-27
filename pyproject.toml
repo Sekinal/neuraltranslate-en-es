@@ -13,4 +13,9 @@ dependencies = [
     "polars>=1.31.0",
     "evaluate>=0.4.4",
     "sacrebleu>=2.5.1",
+    "tf-keras>=2.19.0",
+    "bleurt-pytorch",
 ]
+
+[tool.uv.sources]
+bleurt-pytorch = { git = "https://github.com/lucadiliello/bleurt-pytorch.git" }
