@@ -32,8 +32,8 @@ tokenizer = get_chat_template(
 
 from datasets import load_dataset
 # Load the full dataset
-train_dataset = load_dataset("Thermostatic/Axolotl-Spanish-Nahuatl-ShareGPT-Filtered-Splits", split="train")
-validation_dataset = load_dataset("Thermostatic/Axolotl-Spanish-Nahuatl-ShareGPT-Filtered-Splits", split="validation")
+train_dataset = load_dataset("Thermostatic/NeuralTranslate-mt-en-es-v2-Splits", split="train")
+validation_dataset = load_dataset("Thermostatic/NeuralTranslate-mt-en-es-v2-Splits", split="validation")
 
 print(f"Dataset splits:")
 print(f"  Train: {len(train_dataset)} examples")
